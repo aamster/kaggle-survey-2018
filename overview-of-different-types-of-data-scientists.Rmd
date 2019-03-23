@@ -1,0 +1,566 @@
+---
+title: "Data analysis - Overview of different types of data scientists"
+date: '`r Sys.Date()`'
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+---
+
+```{r message = FALSE, warning=FALSE}
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(tidyverse)
+library(ggpubr)
+```
+
+# Overview
+
+The dataset is the 2018 Kaggle data science survey. In this survey, Kagglers are asked various questions about what they do, their backgrounds, and opinions on various data science topics. There were about 23,000 respondents. The survey data is interesting to mine, since it gives perspective on what people interested in data science are working on, and what are current trends in data science.
+
+In this analysis, I would like to group Kagglers into categories based on what they do at work, then find out more about each category's backgrounds. I am interested in discovering how people got to where they are and what makes each category unique based on what they do at work. 
+
+To do this, I will use k-means clusters using **Q11** (Job activities) as input. 
+
+# Executive summary of findings
+
+* Category 1 
+    + **Overview**: ML Researcher who researches, builds prototypes, runs infrastructure
+    + **Education**: More likely to have a PhD than average
+    + **Years ML Experience**: Generally has 1-2 years ML experience
+    + **Industry**: Works more in academia than average
+    + **Proportion of Education**: Attributes more of education to university than average
+    + **% Exploring model insights**: Doesn't spend too much time exploring model insights
+* Category 2
+    + **Overview**: Data scientist who analyzes data, builds/runs ML service, builds prototypes
+    + **Undergrad degree**: More likely to have a physics/astrononmy background than average
+    + **Age**: Tends to be older than average
+    + **Programming Languages**: Uses R more than average
+    + **Years ML Experience**: Generally has 1-2 years ML experience
+    + **Industry**: Works for a SAAS company more than average
+    + **Proportion of Education**: Attributes more of education to work than average
+    + **% Exploring model insights**: Spends the most time analyzing model insights out of all groups
+* Category 3
+    + **Overview**: Software engineer who has no ML experience. I believe these are software engineers interested in learning about ML and data and maybe transitioning their career.
+    + **Education**: More likely to have a bachelor's degree than average
+    + **Undergrad degree**: Likely to not have a math/stat backgound
+    + **Age**: Tends to be the youngest of all groups
+    + **Programming Languages**: Uses Java more than average
+    + **Industry**: Works for academia more than average. 
+    + **Proportion of Education**: Attributes more of education to online study than average
+* Category 4
+    + **Overview**: Data scientist/research scientist who does not analyze data but rather runs ML service and builds prototypes
+    + **Education**: More likely to have a PhD than average
+    + **Undergrad degree**: More CS backgrounds than other groups
+    + **Years ML Experience**: More people with 2-3 years ML experience than other groups
+    + **Industry**: Works for a SAAS company more than average
+    + **Programming Languages**: Uses C/C++ and Java more than average
+    + **Proportion of Education**: Attributes more of education to work than average
+    + **% Exploring model insights**: Doesn't spend too much time analyzing model insights
+* Category 5
+    + **Overview**: Data analyst/Data scientist who analyzes data
+    + **Education**: More likely to have a bachelor's degree than average
+    + **Undergrad degree**: Fewer people with CS backgrounds than other groups
+    + **Years ML Experience**: More likely to have no ML experience than average
+    + **Programming Languages**: Uses R more than average, and more people use SQL as primary language than average
+    + **Proportion of Education**: Attributes more of education to online study than average
+    + **% Exploring model insights**: Doesn't spend too much time analyzing model insights
+
+```{r}
+mc = fread('../input/multipleChoiceResponses.csv')
+mc[, id := seq.int(nrow(mc))]
+schema = fread('../input/SurveySchema.csv')
+question_text = mc[1]
+mc = mc[-1]
+```
+
+# Filtering out students
+
+```{r}
+ggplot(mc[Q6 != "", .(Percentage = .N / nrow(mc) * 100), by = .(Q6)], aes(reorder(Q6, Percentage, function(x) x), Percentage)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(x = "Title")
+```
+
+It turns out that over 20% of Kagglers in the survey are students. It makes sense, since Kaggle is a data science learning platform, and students are trying to learn all they can, that the most common title is "Student". However in this analysis I am only concerned with people who have graduated from school and are applying what they have learned to their job. Therefore I will filter out students from the analysis.
+
+```{r}
+mc = mc[Q6 != "Student" & Q7 != "I am a student"]
+```
+
+# Applying K-means
+Let's use K-means to assign clusters to each observation. 
+
+```{r}
+set.seed(1234)
+
+assign_clusters = function() {
+  mc = copy(mc)
+  
+  questions_to_include = c('Q11')
+  questions = c()
+  for (q in questions_to_include) {
+    matching_questions = names(mc)[grepl(q, names(mc)) & !grepl('OTHER', names(mc))]
+    questions = append(questions, matching_questions)
+  }
+  
+  mc = mc[, .SD, .SDcols = c('id', questions)]
+  
+  # Create binary matrix
+  numerical = c('Q34', 'Q35')
+  numerical_questions = c()
+  for (q in questions) {
+    if (any(str_detect(q, numerical))) {
+      numerical_questions = append(numerical_questions, T)
+    } else {
+      numerical_questions = append(numerical_questions, F)
+    }
+  }
+  for (j in questions[!numerical_questions]) set(mc, j = j, value = case_when(mc[[j]] != "" ~ 1, T ~ 0))
+  for (j in questions[numerical_questions]) set(mc, j = j, value = as.numeric(mc[[j]]))
+  for (j in questions[numerical_questions]) set(mc, j = j, value = case_when(is.na(mc[[j]]) ~ 0, T ~ mc[[j]]))
+  
+  res = kmeans(mc[, .SD, .SDcols = setdiff(names(mc), c('id'))], 5)
+  # print(res)
+  
+  mc$cluster = res$cluster
+  mc = mc[, .(id, cluster)]
+  
+  return(mc)
+  
+}
+
+
+clusters = assign_clusters()
+```
+
+In the following plots, we use the resulting clusters to compare overall trends for interesting questions across the dataset to trends within each cluster. 
+
+# Job Activities
+
+```{r fig.width=12}
+job_activities_questions = names(mc)[grepl('Q11', names(mc)) & !grepl('OTHER', names(mc))]
+activities = mc %>% melt(id.vars = c('id'), measure.vars = job_activities_questions)
+activities = activities[value != ""]
+activities[, value := case_when(
+  value == 'Analyze and understand data to influence product or business decisions' ~ "Analyze/understand data",
+  value == 'Build and/or run a machine learning service that operationally improves my product or workflows' ~ 'Build and/or run ML service',
+  value == 'Build and/or run the data infrastructure that my business uses for storing, analyzing, and operationalizing data' ~ 'Build and/or run data infrastructure',
+  value == 'Build prototypes to explore applying machine learning to new areas' ~ 'Build ML prototypes',
+  value == 'Do research that advances the state of the art of machine learning' ~ 'ML Research',
+  value == 'None of these activities are an important part of my role at work' ~ 'No ML work',
+  T ~ 'Other'
+)]
+
+n_unique_ids = length(unique(activities[, id]))
+activities_global_percentage = activities[, .(Global_Percentage = .N / n_unique_ids * 100), by = .(value)]
+activities_global_percentage[order(-Global_Percentage), rank := seq.int(.N)]
+g1 = ggplot(activities_global_percentage[rank <= 8], aes(reorder(value, -Global_Percentage), Global_Percentage, fill = value)) +
+  geom_bar(stat = "identity") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(title = "Global Trend", y = "Percentage") +
+  guides(fill=guide_legend(title="Job Activities"))
+
+
+
+activities = activities %>% merge(clusters, by = 'id')
+
+activities[, size := length(unique(id)), by = .(cluster)]
+activities = activities[, .(Percentage = .N / unique(size) * 100), by = .(value, cluster)]
+activities[order(-Percentage), rank := seq.int(.N), by = .(cluster)]
+activities = activities[rank <= 5]
+activities[, cluster := as.factor(cluster)]
+
+g2 = ggplot(activities, aes(cluster, Percentage, fill = value, group = rank)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  guides(fill=guide_legend(title="Job Activities")) +
+  labs(title = "Cluster Trend")
+
+ggarrange(g1, g2, nrow = 2, legend = "top")
+```
+
+* Cluster 1: About 20% globally does ML research, but more than 50% does ML research in this cluster, and the most common globally (data analysis) is 4th most common in this cluster).
+* Cluster 2: Does equal amounts analysis and building/running ML service in 100% of observations, followed by building ML prototypes. 
+* Cluster 3: Most people in this cluster do no ML work. 
+* Cluster 4: In 100% of observations, people build and/or run an ML service, followed by building ML prototypes.
+* Cluster 5: In 100% of observations, people analyze data, and other activities are found in less than 25% of observations. 
+
+# Job Title
+
+```{r fig.width=12}
+title = copy(mc) %>% merge(clusters, by = c('id'))
+title = title[, .(id, cluster, Q6)]
+title = title[Q6 != ""]
+
+title_global_percentage = title[, .(Global_Percentage = .N / nrow(title) * 100), by = .(Q6)]
+title_global_percentage[order(-Global_Percentage), rank := seq.int(.N)]
+g1 = ggplot(title_global_percentage[rank <= 7], aes(reorder(Q6, -Global_Percentage), Global_Percentage, fill = Q6)) +
+  geom_bar(stat = "identity") +
+    theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(title = "Global Trend", y = "Percentage") +
+  guides(fill=guide_legend(title="Title"))
+
+title[, size := length(unique(id)), by = .(cluster)]
+title = title[, .(Percentage = .N / unique(size) * 100), by = .(Q6, cluster)]
+title[order(-Percentage), rank := seq.int(.N), by = .(cluster)]
+title = title[rank <= 3]
+
+g2 = ggplot(title, aes(cluster, Percentage, fill = Q6, group = rank)) +
+  geom_bar(stat = "identity", position = "dodge") +
+    guides(fill=guide_legend(title="Title")) +
+    labs(title = "Cluster Trend")
+
+ggarrange(g1, g2, nrow = 2, legend = "top")
+```
+
+* Cluster 1: Globally, research scientists account for ~5% of observations, but in this cluster research scientist is ~15%.=
+* Cluster 2: Data Scientist strongly predominate.
+* Cluster 3: Software engineer predomiante followed by people not employed and other.
+* Cluster 4: Data scientist predominate, followed by software engineer and research scientist. 
+* Cluster 5: Data analyst predominate.
+
+# Languages
+
+```{r fig.width=12}
+prog_lang = copy(mc)
+
+prog_lang_questions = names(prog_lang)[grepl('Q16', names(prog_lang)) & !grepl('OTHER', names(prog_lang))]
+prog_lang = prog_lang %>% melt(id.vars = c('id'), measure.vars = prog_lang_questions)
+prog_lang = prog_lang[value != ""]
+
+n_unique_ids = length(unique(prog_lang[, id]))
+prog_lang_global_percentage = prog_lang[, .(Global_Percentage = .N / n_unique_ids * 100), by = .(value)]
+prog_lang_global_percentage[order(-Global_Percentage), rank := seq.int(.N)]
+g1 = ggplot(prog_lang_global_percentage[rank <= 8], aes(reorder(value, -Global_Percentage), Global_Percentage, fill = value)) +
+  geom_bar(stat = "identity") +
+    theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(title = "Global Trend", y = "Percentage") +
+  guides(fill=guide_legend(title="Language"))
+
+prog_lang = prog_lang %>% merge(clusters, by = c('id'))
+
+prog_lang[, size := length(unique(id)), by = .(cluster)]
+prog_lang = prog_lang[, .(Percentage = .N / unique(size) * 100), by = .(value, cluster)]
+prog_lang[order(-Percentage), rank := seq.int(.N), by = .(cluster)]
+prog_lang = prog_lang[rank <= 5]
+prog_lang[, cluster := as.factor(cluster)]
+
+g2 = ggplot(prog_lang, aes(cluster, Percentage, fill = value, group = rank)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  guides(fill=guide_legend(title="Language")) +
+  labs(title = "Cluster Trend")
+
+ggarrange(g1, g2, nrow = 2, legend = "top")
+```
+
+Python used heavily by all groups.
+
+* Cluster 1: Uses C/C++ and Java bit more than average.
+* Cluster 2: Uses R more than average. 
+* Cluster 3: Uses C/C++ and Java bit more than average and R less than average. 
+* Cluster 4: Uses C/C++ and Java bit more than average and R less than average. 
+* Cluster 5: Uses R more than average.
+
+# Primary Language
+
+```{r fig.width=12}
+prog_lang = copy(mc)
+
+prog_lang_questions = names(prog_lang)[grepl('Q17', names(prog_lang)) & !grepl('OTHER', names(prog_lang))]
+prog_lang = prog_lang %>% melt(id.vars = c('id'), measure.vars = prog_lang_questions)
+prog_lang = prog_lang[value != ""]
+
+n_unique_ids = length(unique(prog_lang[, id]))
+prog_lang_global_percentage = prog_lang[, .(Global_Percentage = .N / n_unique_ids * 100), by = .(value)]
+prog_lang_global_percentage[order(-Global_Percentage), rank := seq.int(.N)]
+g1 = ggplot(prog_lang_global_percentage[rank <= 5], aes(reorder(value, -Global_Percentage), Global_Percentage, fill = value)) +
+  geom_bar(stat = "identity") +
+    theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(title = "Global Trend", y = "Percentage") +
+  guides(fill=guide_legend(title="Language"))
+
+prog_lang = prog_lang %>% merge(clusters, by = c('id'))
+
+prog_lang[, size := length(unique(id)), by = .(cluster)]
+prog_lang = prog_lang[, .(Percentage = .N / unique(size) * 100), by = .(value, cluster)]
+prog_lang[order(-Percentage), rank := seq.int(.N), by = .(cluster)]
+prog_lang = prog_lang[rank <= 5]
+prog_lang[, cluster := as.factor(cluster)]
+
+g2 = ggplot(prog_lang, aes(cluster, Percentage, fill = value, group = rank)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  guides(fill=guide_legend(title="Language")) +
+  labs(title = "Cluster Trend")
+
+ggarrange(g1, g2, nrow = 2, legend = "top")
+```
+
+All groups claim they use Python as primary language. 
+
+* Cluster 2: Uses R more than average. 
+* Cluster 3: Use Java more than average.  
+* Cluster 5: Uses SQL/R as primary language more than average. 
+
+
+# Years ML Experience
+
+```{r fig.width=12}
+ml_years = copy(mc) %>% merge(clusters, by = c('id'))
+ml_years = ml_years[, .(id, cluster, Q25)]
+ml_years = ml_years[Q25 != ""]
+
+ml_years_global_percentage = ml_years[, .(Global_Percentage = .N / nrow(ml_years) * 100), by = .(Q25)]
+ml_years_global_percentage[order(-Global_Percentage), rank := seq.int(.N)]
+g1 = ggplot(ml_years_global_percentage[rank <= 4], aes(reorder(Q25, -Global_Percentage), Global_Percentage, fill = Q25)) +
+  geom_bar(stat = "identity") +
+    theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(title = "Global Trend", y = "Percentage") +
+  guides(fill=guide_legend(title="Years ML Experience"))
+
+ml_years[, size := length(unique(id)), by = .(cluster)]
+ml_years = ml_years[, .(Percentage = .N / unique(size) * 100), by = .(Q25, cluster)]
+ml_years[order(-Percentage), rank := seq.int(.N), by = .(cluster)]
+ml_years = ml_years[rank <= 3]
+
+g2 = ggplot(ml_years, aes(cluster, Percentage, fill = Q25, group = rank)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  guides(fill=guide_legend(title="Years ML Experience")) +
+  labs(title = "Cluster Trend")
+
+ggarrange(g1, g2, nrow = 2, legend = "top")
+```
+
+* Clusters 1, 2, 4 have highest concentration of people with 1-2 years ML experience
+* Cluster 4 has highest concentration of people with 2-3 years ML experience. 
+* Clusters 3 and 5 have a lot of people with < 1 year ML experience or no ML experience
+
+# Highest educational degree
+
+```{r fig.width=12, warning=F, error=F}
+highest_schooling = copy(mc) %>% merge(clusters, by = c('id'))
+highest_schooling = highest_schooling[, .(id, cluster, Q4)]
+highest_schooling = highest_schooling[Q4 != ""]
+
+highest_schooling_global_percentage = highest_schooling[, .(Global_Percentage = .N / nrow(highest_schooling) * 100), by = .(Q4)]
+highest_schooling_global_percentage[order(-Global_Percentage), rank := seq.int(.N)]
+g1 = ggplot(highest_schooling_global_percentage[rank <= 5], aes(reorder(Q4, -Global_Percentage), Global_Percentage, fill = Q4)) +
+  geom_bar(stat = "identity") +
+    theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(title = "Global Trend", y = "Percentage") +
+  guides(fill=guide_legend(title="Education"))
+
+highest_schooling[, size := length(unique(id)), by = .(cluster)]
+highest_schooling = highest_schooling[, .(Percentage = .N / unique(size) * 100), by = .(Q4, cluster)]
+highest_schooling[order(-Percentage), rank := seq.int(.N), by = .(cluster)]
+highest_schooling = highest_schooling[rank <= 3]
+
+g2 = ggplot(highest_schooling, aes(cluster, Percentage, fill = Q4, group = rank)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  guides(fill=guide_legend(title="Education")) +
+  labs(title = "Cluster Trend")
+
+ggarrange(g1, g2, nrow = 2, legend = "top")
+```
+
+All clusters have most common as master's degree.
+
+* Clusters 1, 4 have more PhDs than average. 
+* Cluster 3, 5 have more people with bachelor's degrees than average
+
+# Undergrad department
+
+```{r fig.width=14}
+major = copy(mc) %>% merge(clusters, by = c('id'))
+major = major[, .(id, cluster, Q5)]
+major = major[Q5 != ""]
+
+major_global_percentage = major[, .(Global_Percentage = .N / nrow(major) * 100), by = .(Q5)]
+major_global_percentage[order(-Global_Percentage), rank := seq.int(.N)]
+g1 = ggplot(major_global_percentage[rank <= 5], aes(reorder(Q5, -Global_Percentage), Global_Percentage, fill = Q5)) +
+  geom_bar(stat = "identity") +
+    theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(title = "Global Trend", y = "Percentage") +
+  guides(fill=guide_legend(title="Undergrad Department"))
+
+major[, size := length(unique(id)), by = .(cluster)]
+major = major[, .(Percentage = .N / unique(size) * 100), by = .(Q5, cluster)]
+major[order(-Percentage), rank := seq.int(.N), by = .(cluster)]
+major = major[rank <= 5]
+
+g2 = ggplot(major, aes(cluster, Percentage, fill = Q5, group = rank)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  guides(fill=guide_legend(title="Undergrad Department")) +
+  labs(title = "Cluster Trend")
+
+ggarrange(g1, g2, nrow = 2, legend = "top")
+```
+
+CS most common across groups, but found less than average in cluster 5. 
+
+* Physics/astronomy found bit more than average in cluster 2. 
+* People with math/stat background found less than average in cluster 3. 
+
+# Industry
+
+```{r fig.width=12}
+industry = copy(mc) %>% merge(clusters, by = c('id'))
+industry = industry[, .(id, cluster, Q7)]
+industry = industry[Q7 != ""]
+
+industry_global_percentage = industry[, .(Global_Percentage = .N / nrow(industry) * 100), by = .(Q7)]
+industry_global_percentage[order(-Global_Percentage), rank := seq.int(.N)]
+g1 = ggplot(industry_global_percentage[rank <= 5], aes(reorder(Q7, -Global_Percentage), Global_Percentage, fill = Q7)) +
+  geom_bar(stat = "identity") +
+    theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(title = "Global Trend", y = "Percentage") +
+  guides(fill=guide_legend(title="Industry"))
+
+industry[, size := length(unique(id)), by = .(cluster)]
+industry = industry[, .(Percentage = .N / unique(size) * 100), by = .(Q7, cluster)]
+industry[order(-Percentage), rank := seq.int(.N), by = .(cluster)]
+industry = industry[rank <= 3]
+
+g2 = ggplot(industry, aes(cluster, Percentage, fill = Q7, group = rank)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  guides(fill=guide_legend(title="Industry")) +
+  labs(title = "Cluster Trend")
+
+ggarrange(g1, g2, nrow = 2, legend = "top")
+```
+
+People work in tech most commonly. 
+
+* Cluster 1 has more people in academia than average. 
+* SAAS companies most commonly found in clusters 2 and 4. 
+
+# Age
+
+```{r fig.width=12}
+age = copy(mc) %>% merge(clusters, by = c('id'))
+age = age[, .(id, cluster, Q2)]
+age = age[Q2 != ""]
+
+industry_global_percentage = age[, .(Global_Percentage = .N / nrow(age) * 100), by = .(Q2)]
+industry_global_percentage[order(-Global_Percentage), rank := seq.int(.N)]
+g1 = ggplot(industry_global_percentage[rank <= 5], aes(reorder(Q2, -Global_Percentage), Global_Percentage, fill = Q2)) +
+  geom_bar(stat = "identity") +
+    theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(title = "Global Trend", y = "Percentage") +
+  guides(fill=guide_legend(title="Age"))
+
+age[, size := length(unique(id)), by = .(cluster)]
+age = age[, .(Percentage = .N / unique(size) * 100), by = .(Q2, cluster)]
+age[order(-Percentage), rank := seq.int(.N), by = .(cluster)]
+age = age[rank <= 3]
+
+g2 = ggplot(age, aes(cluster, Percentage, fill = Q2, group = rank)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  guides(fill=guide_legend(title="Age")) +
+  labs(title = "Cluster Trend")
+
+ggarrange(g1, g2, nrow = 2, legend = "top")
+```
+
+People in mid-late 20's most common across groups. 
+
+* Cluster 3 has most people in early 20's. 
+* Cluster 2 has older people than average. 
+
+# Mode of study
+
+```{r fig.width=12}
+training_questions = names(mc)[grepl('Q35', names(mc)) & !grepl('OTHER', names(mc))]
+training = copy(mc)
+new_names = question_text[, .SD, .SDcols = training_questions]
+new_names = gsub('- ', '', str_extract(new_names, '- (\\w+)'))
+setnames(training, old = training_questions, new = new_names)
+training = training %>% melt(id.vars = c('id'), measure.vars = new_names)
+training[, value := as.numeric(value)]
+training = training[!is.na(value)]
+
+g1 = ggplot(training, aes(reorder(variable, value, FUN = median), value, fill = variable)) +
+  geom_boxplot() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(title = "Global Trend", y = "% Importance") +
+  guides(fill=guide_legend(title="Mode of study"))
+
+
+
+training = training %>% merge(clusters, by = 'id')
+training[, cluster := as.factor(cluster)]
+
+g2 = ggplot(training, aes(cluster, value, fill = variable)) +
+  geom_boxplot() +
+  guides(fill=guide_legend(title="Mode of study")) +
+  labs(title = "Cluster Trend", y = "% Impportance")
+
+ggarrange(g1, g2, nrow = 2, legend = "top")
+```
+
+All clusters attribute most of education to self and online study.
+
+* Cluster 1 attributes more of education to university study than average. 
+* Cluster 2 attributes more of education to work than average. 
+* Clusters 3,5 are biggest fans of online study.
+
+# % Exploring model insights
+
+```{r fig.width=12}
+insights = copy(mc) %>% merge(clusters, by = c('id'))
+insights = insights[, .(id, cluster, Q46)]
+insights = insights[Q46 != ""]
+
+insights_global_percentage = insights[, .(Global_Percentage = .N / nrow(insights) * 100), by = .(Q46)]
+insights_global_percentage[order(-Global_Percentage), rank := seq.int(.N)]
+g1 = ggplot(insights_global_percentage[rank <= 5], aes(reorder(Q46, -Global_Percentage), Global_Percentage, fill = Q46)) +
+  geom_bar(stat = "identity") +
+    theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(title = "Global Trend", y = "Percentage") +
+  guides(fill=guide_legend(title="% Exploring model insights"))
+
+insights[, size := length(unique(id)), by = .(cluster)]
+insights = insights[, .(Percentage = .N / unique(size) * 100), by = .(Q46, cluster)]
+insights[order(-Percentage), rank := seq.int(.N), by = .(cluster)]
+insights = insights[rank <= 3]
+
+g2 = ggplot(insights, aes(cluster, Percentage, fill = Q46, group = rank)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  guides(fill=guide_legend(title="% Exploring model insights")) +
+  labs(title = "Cluster Trend")
+
+ggarrange(g1, g2, nrow = 2, legend = "top")
+```
+
+
+* Cluster 2 spends more time analyzing model insights than the other groups.
+* Cluster 3 spends the least amount of time analyzing model insights. 
+* Clusters 1, 4 spend about equal amounts of time analyzing model insights. 
+
+# Summary
+
+We were able to use K-means clustering with job activities as input and found that this produces distinct clusters representing people of different backgrounds and interests. In my opinion this gives an overview of the different types of people interested in data science on Kaggle.
